@@ -5,6 +5,7 @@ from typing import Protocol, TypeAlias, TypeVar, runtime_checkable
 
 import flax.traverse_util as traverse_util
 import jax
+import torch
 import numpy as np
 from openpi_client import image_tools
 
@@ -213,12 +214,21 @@ class DeltaActions(DataTransformFn):
         if "actions" not in data or self.mask is None:
             return data
 
-        state, actions = data["state"], data["actions"]
-        mask = np.asarray(self.mask)
-        dims = mask.shape[-1]
-        actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
-        data["actions"] = actions
+        actions = data["actions"]  # shape: (T,D) or (B,T,D)
+        mask = np.asarray(self.mask, dtype=bool)
+        D = actions.shape[-1]
+        if mask.size != D:
+            raise ValueError(f"Mask size {mask.size} does not match action dimension {D}")
 
+        # temporal deltas over the time axis
+        deltas = actions - actions[..., :1, :]
+
+        # apply only to masked dims
+        submask = torch.as_tensor(mask).reshape((1,) * (actions.ndim - 1) + (D,))
+        deltas = torch.as_tensor(deltas)
+        actions = torch.where(submask, deltas, actions)
+
+        data["actions"] = actions
         return data
 
 
@@ -236,6 +246,8 @@ class AbsoluteActions(DataTransformFn):
             return data
 
         state, actions = data["state"], data["actions"]
+        raise ValueError(f"state shape {state.shape}, actions shape {actions.shape}")
+        return data
         mask = np.asarray(self.mask)
         dims = mask.shape[-1]
         actions[..., :dims] += np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
