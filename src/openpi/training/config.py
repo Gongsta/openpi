@@ -65,6 +65,8 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # List of all repo IDs when multiple datasets are used. If None, only repo_id is used.
+    repo_ids: Sequence[str] | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -165,8 +167,8 @@ class ModelTransformFactory(GroupFactory):
 
 @dataclasses.dataclass(frozen=True)
 class DataConfigFactory(abc.ABC):
-    # The LeRobot repo id.
-    repo_id: str = tyro.MISSING
+    # The LeRobot repo id. Can be a single string or a list of repo IDs for multi-dataset training.
+    repo_id: str | Sequence[str] = tyro.MISSING
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
@@ -177,11 +179,22 @@ class DataConfigFactory(abc.ABC):
         """Create a data config."""
 
     def create_base_config(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
-        asset_id = self.assets.asset_id or repo_id
+        # Normalize repo_id to handle both string and sequence
+        if self.repo_id is tyro.MISSING:
+            canonical_repo_id = None
+            all_repo_ids = None
+        elif isinstance(self.repo_id, str):
+            canonical_repo_id = self.repo_id
+            all_repo_ids = None
+        else:  # Sequence[str]
+            canonical_repo_id = self.repo_id[0]
+            all_repo_ids = list(self.repo_id)
+
+        asset_id = self.assets.asset_id or canonical_repo_id
         return dataclasses.replace(
             self.base_config or DataConfig(),
-            repo_id=repo_id,
+            repo_id=canonical_repo_id,
+            repo_ids=all_repo_ids,
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
             use_quantile_norm=model_config.model_type != ModelType.PI0,
@@ -358,15 +371,21 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 @dataclasses.dataclass(frozen=True)
 class LeRobotKochDataConfig(DataConfigFactory):
     """
-    This config is used to configure transforms that are applied at various parts of the data pipeline.
+    Config for Koch robot datasets. Supports both single-arm and dual-arm configurations.
+
     For your own dataset, you can copy this class and modify the transforms to match your dataset based on the
     comments below.
     """
 
+    # If True, configures for dual-arm robot (includes right_wrist camera). If False, single-arm (no right_wrist).
+    dual_arm: bool = True
     extra_delta_transform: bool = True  # IMPORTANT: we want to learn policy with delta representation
     # Action keys that will be used to read the action sequence from the dataset.
     # Koch dataset uses singular 'action' in HF columns.
     action_sequence_keys: Sequence[str] = ("action",)
+    # Mapping from base prompts to variations for data augmentation. If provided, will randomly select a prompt
+    # variation during training. Example: {"Pick up the cup": ["Pick up the cup", "Grab the cup", "Take the cup"]}
+    prompt_variations: dict[str, Sequence[str]] | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -378,25 +397,32 @@ class LeRobotKochDataConfig(DataConfigFactory):
         # For your own dataset, first figure out what keys your environment passes to the policy server
         # and then modify the mappings below so your dataset's keys get matched to those target keys.
         # The repack transform simply remaps key names here.
+        repack_structure = {
+            "observation.images.top": "observation.images.top",
+            "observation.images.left_wrist": "observation.images.left_wrist",
+            "observation.state": "observation.state",
+            "prompt": "task",
+            "actions": "action",
+        }
+
+        # Add right_wrist camera for dual-arm configuration
+        if self.dual_arm:
+            repack_structure["observation.images.right_wrist"] = "observation.images.right_wrist"
+
+        repack_transforms_list = [_transforms.RepackTransform(repack_structure)]
+
+        # Add prompt augmentation if variations are provided
+        if self.prompt_variations is not None:
+            repack_transforms_list.append(_transforms.AugmentPrompt(self.prompt_variations))
+
         repack_transform = _transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation.images.top": "observation.images.top",
-                        "observation.images.left_wrist": "observation.images.left_wrist",
-                        "observation.images.right_wrist": "observation.images.right_wrist",
-                        "observation.state": "observation.state",
-                        "prompt": "task",
-                        "actions": "action",
-                    }
-                )
-            ]
+            inputs=repack_transforms_list
         )
 
         # The data transforms are applied to the data coming from the dataset *and* during inference.
         # Below, we define the transforms for data going into the model (``inputs``) and the transforms
         # for data coming out of the model (``outputs``) (the latter is only used during inference).
-        # We defined these transforms in `libero_policy.py`. You can check the detailed comments there for
+        # We defined these transforms in `koch_policy.py`. You can check the detailed comments there for
         # how to modify the transforms to match your dataset. Once you created your own transforms, you can
         # replace the transforms below with your own.
         data_transforms = _transforms.Group(
@@ -416,12 +442,21 @@ class LeRobotKochDataConfig(DataConfigFactory):
 
         # Learn policy with delta representation. Assumes input is not in delta representation.
         if self.extra_delta_transform:
-            delta_action_mask = _transforms.make_bool_mask(
-                6,  # 6x True
-                -1,  # 1x False  (7th element = gripper)
-                6,  # 6x True
-                -1,  # 1x False  (14th element = gripper)
-            )
+            if self.dual_arm:
+                # Dual-arm: 6 DoF + 1 gripper per arm = 14 total
+                delta_action_mask = _transforms.make_bool_mask(
+                    6,  # 6x True (left arm ee pose)
+                    -1,  # 1x False (left gripper)
+                    6,  # 6x True (right arm ee pose)
+                    -1,  # 1x False (right gripper)
+                )
+            else:
+                # Single-arm: 6 DoF + 1 gripper = 7 total
+                delta_action_mask = _transforms.make_bool_mask(
+                    6,  # 6x True (ee pose: x, y, z, wx, wy, wz)
+                    -1,  # 1x False (gripper)
+                )
+
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 # outputs=[_transforms.AbsoluteActions(delta_action_mask)], # We cannot get absolute actions from the dataset, since we use end-effector poses as actions.
@@ -854,6 +889,66 @@ _CONFIGS = [
             extra_delta_transform=True,  # IMPORTANT: we want to learn policy with delta representation
         ),
         batch_size=64,  # Todo: try 128?
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Freeze all base weights; train only LoRA parameters
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,  # turn off EMA for LoRA finetuning
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=10_000,
+    ),
+    TrainConfig(
+        name="pi05_koch_single",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",  # enable LoRA for vision/LLM expert
+            action_expert_variant="gemma_300m_lora",  # enable LoRA for action expert
+        ),
+        data=LeRobotKochDataConfig(
+            dual_arm=False,  # Single-arm configuration
+            repo_id=[
+                "Gongsta/koch-microcontroller-blue-cup",
+                "Gongsta/koch-microcontroller-white-cup",
+                "Gongsta/koch-microcontroller-black-cup",
+            ],
+            assets=AssetsConfig(asset_id="koch_cup_picking_single"),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+            # Prompt augmentation: provide variations for each task to improve generalization
+            prompt_variations={
+                "Pick up the microcontroller and put it in the left cup": [
+                    "Pick up the microcontroller and put it in the left cup",
+                    "pick up the microcontroller and place it in the left cup",
+                    "grab the microcontroller and put it in the cup on the left",
+                    "move the microcontroller to the left cup",
+                    "put the microcontroller in the left cup",
+                ],
+                "Pick up the microcontroller and put it in the white cup": [
+                    "Pick up the microcontroller and put it in the white cup",
+                    "pick up the microcontroller and place it in the white cup",
+                    "grab the microcontroller and put it in the white cup",
+                    "move the microcontroller to the white cup",
+                    "put the microcontroller in the white cup",
+                ],
+                "Pick up the microcontroller and put it in the black cup": [
+                    "Pick up the microcontroller and put it in the black cup",
+                    "pick up the microcontroller and place it in the black cup",
+                    "grab the microcontroller and put it in the black cup",
+                    "move the microcontroller to the black cup",
+                    "put the microcontroller in the black cup",
+                ],
+            },
+        ),
+        batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=2.5e-5,

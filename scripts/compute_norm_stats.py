@@ -90,6 +90,15 @@ def main(config_name: str, max_frames: int | None = None):
     config = _config.get_config(config_name)
     data_config = config.data.create(config.assets_dirs, config.model)
 
+    # Log information about datasets being processed
+    if data_config.repo_ids is not None and len(data_config.repo_ids) > 1:
+        print(f"Computing normalization stats across {len(data_config.repo_ids)} datasets:")
+        for i, repo_id in enumerate(data_config.repo_ids):
+            print(f"  [{i}] {repo_id}")
+        print(f"Stats will be saved to: {config.assets_dirs / data_config.asset_id}")
+    elif data_config.repo_id:
+        print(f"Computing normalization stats for: {data_config.repo_id}")
+
     if data_config.rlds_data_dir is not None:
         data_loader, num_batches = create_rlds_dataloader(
             data_config, config.model.action_horizon, config.batch_size, max_frames
@@ -108,7 +117,7 @@ def main(config_name: str, max_frames: int | None = None):
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-    output_path = config.assets_dirs / data_config.repo_id
+    output_path = config.assets_dirs / data_config.asset_id
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 

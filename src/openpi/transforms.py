@@ -337,6 +337,69 @@ class PromptFromLeRobotTask(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class AugmentPrompt(DataTransformFn):
+    """Augments prompts by randomly selecting from a list of variations.
+
+    This transform should be applied AFTER PromptFromLeRobotTask or InjectDefaultPrompt
+    has set the base prompt. During training, it randomly replaces the prompt with a
+    variation to help the model generalize to different phrasings.
+
+    Example:
+        Base prompt: "Pick up the microcontroller and put it in the left cup"
+        Variations: [
+            "pick up the microcontroller and place it in the left cup",
+            "grab the microcontroller and put it in the cup on the left",
+            "move the microcontroller to the left cup"
+        ]
+    """
+
+    # Mapping from base prompt to list of prompt variations (including the base prompt if desired).
+    # The transform will randomly select one variation for each sample.
+    prompt_variations: dict[str, Sequence[str]]
+    # If True, raises an error when encountering a prompt not in prompt_variations.
+    # If False, logs a warning once per unknown prompt and uses the original prompt.
+    strict: bool = True
+
+    def __post_init__(self):
+        # Keep track of unknown prompts we've warned about (class variable would be better but frozen dataclass)
+        object.__setattr__(self, "_warned_prompts", set())
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "prompt" not in data:
+            return data
+
+        prompt = data["prompt"]
+        if not isinstance(prompt, str):
+            prompt = prompt.item()
+
+        # Look up variations for this prompt
+        if prompt in self.prompt_variations:
+            variations = self.prompt_variations[prompt]
+            if len(variations) > 0:
+                # Randomly select one variation
+                idx = np.random.randint(len(variations))
+                data = dict(data)  # Make a copy to avoid modifying the original
+                data["prompt"] = variations[idx]
+        else:
+            # Prompt not found in variations
+            if self.strict:
+                raise ValueError(
+                    f"Prompt '{prompt}' not found in prompt_variations. "
+                    f"Available prompts: {list(self.prompt_variations.keys())}"
+                )
+            elif prompt not in self._warned_prompts:
+                # Warn once per unique unknown prompt
+                import logging
+                logging.warning(
+                    f"Prompt '{prompt}' not found in prompt_variations. Using original prompt. "
+                    f"Available prompts: {list(self.prompt_variations.keys())}"
+                )
+                self._warned_prompts.add(prompt)
+
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class PadStatesAndActions(DataTransformFn):
     """Zero-pads states and actions to the model action dimension."""
 

@@ -52,7 +52,11 @@ class KochInputs(transforms.DataTransformFn):
         # right wrist image below.
         base_image = _parse_image(data["observation.images.top"])
         left_wrist_image = _parse_image(data["observation.images.left_wrist"])
-        right_wrist_image = _parse_image(data["observation.images.right_wrist"])
+        # Koch dataset doesn't have right wrist camera, so we use zeros
+        if "observation.images.right_wrist" in data:
+            right_wrist_image = _parse_image(data["observation.images.right_wrist"])
+        else:
+            right_wrist_image = np.zeros_like(left_wrist_image)
 
         # Create inputs dict. Do not change the keys in the dict below.
         inputs = {

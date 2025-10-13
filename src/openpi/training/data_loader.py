@@ -19,6 +19,96 @@ import openpi.transforms as _transforms
 T_co = TypeVar("T_co", covariant=True)
 
 
+def _validate_datasets_compatibility(
+    datasets_meta: Sequence[lerobot_dataset.LeRobotDatasetMetadata],
+    action_sequence_keys: Sequence[str],
+) -> None:
+    """Validate that multiple datasets are compatible for training together.
+
+    Args:
+        datasets_meta: Metadata for all datasets to be combined.
+        action_sequence_keys: Required action sequence keys.
+
+    Raises:
+        ValueError: If datasets are incompatible.
+    """
+    if len(datasets_meta) < 2:
+        return  # Nothing to validate
+
+    # Check FPS consistency (allow 1% tolerance)
+    base_fps = datasets_meta[0].fps
+    for i, meta in enumerate(datasets_meta[1:], start=1):
+        if abs(meta.fps - base_fps) / base_fps > 0.01:
+            raise ValueError(
+                f"Dataset FPS mismatch: dataset 0 has fps={base_fps}, "
+                f"dataset {i} has fps={meta.fps}. All datasets must have the same FPS."
+            )
+
+    # Check that all datasets have required action_sequence_keys
+    for i, meta in enumerate(datasets_meta):
+        for key in action_sequence_keys:
+            if key not in meta.features:
+                raise ValueError(
+                    f"Dataset {i} ({meta.repo_id}) is missing required action key '{key}'. "
+                    f"Available features: {list(meta.features.keys())}"
+                )
+
+    logging.info(f"Validated {len(datasets_meta)} datasets for compatibility:")
+    for i, meta in enumerate(datasets_meta):
+        logging.info(f"  Dataset {i}: {meta.repo_id} ({meta.total_episodes} episodes, {meta.total_frames} frames)")
+
+
+def _merge_task_mappings(
+    datasets_meta: Sequence[lerobot_dataset.LeRobotDatasetMetadata],
+) -> tuple[dict[int, str], list[int]]:
+    """Merge task mappings from multiple datasets with offset indices.
+
+    Task indices are offset to prevent collisions between datasets.
+
+    Args:
+        datasets_meta: Metadata for all datasets.
+
+    Returns:
+        Tuple of (unified task mapping with offset indices, list of offsets for each dataset).
+    """
+    merged_tasks = {}
+    offsets = []
+    offset = 0
+
+    for i, meta in enumerate(datasets_meta):
+        offsets.append(offset)
+
+        if "task_index" not in meta.tasks:
+            logging.warning(f"Dataset {i} ({meta.repo_id}) has no task_index mapping, skipping task merge for this dataset")
+            continue
+
+        dataset_tasks = {int(v): str(k) for k, v in meta.tasks["task_index"].items()}
+
+        # Add tasks with offset
+        for task_idx, task_name in dataset_tasks.items():
+            merged_tasks[task_idx + offset] = task_name
+
+        # Update offset for next dataset
+        if dataset_tasks:
+            offset += max(dataset_tasks.keys()) + 1
+
+    logging.info(f"Merged task mappings: {len(merged_tasks)} total tasks across {len(datasets_meta)} datasets")
+    return merged_tasks, offsets
+
+
+class _OffsetTaskIndex(_transforms.DataTransformFn):
+    """Offset task_index in dataset samples."""
+
+    def __init__(self, offset: int):
+        self.offset = offset
+
+    def __call__(self, data: _transforms.DataDict) -> _transforms.DataDict:
+        if "task_index" in data and self.offset != 0:
+            data = dict(data)  # Make a copy
+            data["task_index"] = int(data["task_index"]) + self.offset
+        return data
+
+
 class Dataset(Protocol[T_co]):
     """Interface for a dataset with random access."""
 
@@ -137,6 +227,49 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
+    # Check if we have multiple datasets to combine
+    if data_config.repo_ids is not None and len(data_config.repo_ids) > 1:
+        # Multi-dataset case
+        repo_ids = data_config.repo_ids
+        logging.info(f"Creating multi-dataset from {len(repo_ids)} repos: {repo_ids}")
+
+        # Load metadata for all datasets
+        datasets_meta = [lerobot_dataset.LeRobotDatasetMetadata(rid) for rid in repo_ids]
+
+        # Validate compatibility
+        _validate_datasets_compatibility(datasets_meta, data_config.action_sequence_keys)
+
+        # Create individual datasets
+        datasets = []
+        for i, (rid, meta) in enumerate(zip(repo_ids, datasets_meta)):
+            ds = lerobot_dataset.LeRobotDataset(
+                rid,
+                delta_timestamps={
+                    key: [t / meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+                },
+                video_backend=os.environ.get("LEROBOT_VIDEO_BACKEND"),
+            )
+            datasets.append(ds)
+
+        # Handle task mapping if needed
+        if data_config.prompt_from_task:
+            merged_tasks, offsets = _merge_task_mappings(datasets_meta)
+
+            # Apply offset transform to each dataset before concatenating
+            for i, (ds, offset) in enumerate(zip(datasets, offsets)):
+                if offset != 0:
+                    datasets[i] = TransformedDataset(ds, [_OffsetTaskIndex(offset)])
+
+            # Concatenate all datasets
+            concat_dataset = torch.utils.data.ConcatDataset(datasets)
+
+            # Apply unified task mapping
+            return TransformedDataset(concat_dataset, [_transforms.PromptFromLeRobotTask(merged_tasks)])
+        else:
+            # Just concatenate without task mapping or prompts
+            return torch.utils.data.ConcatDataset(datasets)
+
+    # Single dataset case (backward compatible)
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
