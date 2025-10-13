@@ -218,9 +218,24 @@ class FakeDataset(Dataset):
 
 
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    split: Literal["train", "val"] | None = None,
+    validation_split: float = 0.0,
+    seed: int = 42,
 ) -> Dataset:
-    """Create a dataset for training."""
+    """Create a dataset for training or validation.
+
+    Args:
+        data_config: Data configuration.
+        action_horizon: Number of action steps.
+        model_config: Model configuration.
+        split: Which split to use ("train" or "val"). If None, uses full dataset.
+        validation_split: Fraction of episodes to use for validation (0.0 to 1.0).
+        seed: Random seed for deterministic episode splitting.
+    """
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
@@ -279,11 +294,66 @@ def create_torch_dataset(
         video_backend=os.environ.get("LEROBOT_VIDEO_BACKEND"),
     )
 
+    # Apply episode-based train/val split if requested
+    if split is not None and validation_split > 0.0:
+        dataset = _split_dataset_by_episodes(dataset, split, validation_split, seed)
+
     if data_config.prompt_from_task:
         tasks_map = {int(v): str(k) for k, v in dataset_meta.tasks["task_index"].items()}
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(tasks_map)])
 
     return dataset
+
+
+def _split_dataset_by_episodes(
+    dataset: lerobot_dataset.LeRobotDataset,
+    split: Literal["train", "val"],
+    validation_split: float,
+    seed: int,
+) -> Dataset:
+    """Split dataset by episodes for train/val.
+
+    Args:
+        dataset: LeRobot dataset to split.
+        split: Which split to return ("train" or "val").
+        validation_split: Fraction of episodes for validation.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        Subset of the dataset containing only the requested split.
+    """
+    # Get episode boundaries
+    episode_data_index = dataset.episode_data_index
+    num_episodes = len(episode_data_index["from"])
+
+    # Deterministically shuffle episode indices
+    rng = np.random.RandomState(seed)
+    episode_indices = np.arange(num_episodes)
+    rng.shuffle(episode_indices)
+
+    # Split episodes
+    num_val_episodes = max(1, int(num_episodes * validation_split))
+    val_episode_indices = set(episode_indices[:num_val_episodes].tolist())
+    train_episode_indices = set(episode_indices[num_val_episodes:].tolist())
+
+    logging.info(
+        f"Split dataset: {num_episodes} episodes -> "
+        f"{len(train_episode_indices)} train, {len(val_episode_indices)} val"
+    )
+
+    # Get frame indices for the selected episodes
+    target_episodes = val_episode_indices if split == "val" else train_episode_indices
+    frame_indices = []
+
+    for episode_idx in sorted(target_episodes):
+        from_idx = episode_data_index["from"][episode_idx].item()
+        to_idx = episode_data_index["to"][episode_idx].item()
+        frame_indices.extend(range(from_idx, to_idx))
+
+    logging.info(f"Split '{split}' contains {len(frame_indices)} frames from {len(target_episodes)} episodes")
+
+    # Return a Subset
+    return torch.utils.data.Subset(dataset, frame_indices)
 
 
 def create_rlds_dataset(
@@ -363,8 +433,9 @@ def create_data_loader(
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"] = "jax",
+    split: Literal["train", "val"] | None = None,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
-    """Create a data loader for training.
+    """Create a data loader for training or validation.
 
     Args:
         config: The training configuration.
@@ -373,11 +444,14 @@ def create_data_loader(
         num_batches: Determines the number of batches to return.
         skip_norm_stats: Whether to skip data normalization.
         framework: The framework to use ("jax" or "pytorch").
+        split: Which split to use ("train" or "val"). If None, uses full dataset.
     """
     data_config = config.data.create(config.assets_dirs, config.model)
     logging.info(f"data_config: {data_config}")
 
     if data_config.rlds_data_dir is not None:
+        if split is not None:
+            logging.warning("Train/val split is not supported for RLDS datasets yet")
         return create_rlds_data_loader(
             data_config,
             action_horizon=config.model.action_horizon,
@@ -400,6 +474,8 @@ def create_data_loader(
         seed=config.seed,
         skip_norm_stats=skip_norm_stats,
         framework=framework,
+        split=split,
+        validation_split=config.validation_split,
     )
 
 
@@ -416,6 +492,8 @@ def create_torch_data_loader(
     num_workers: int = 0,
     seed: int = 0,
     framework: str = "jax",
+    split: Literal["train", "val"] | None = None,
+    validation_split: float = 0.0,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
 
@@ -433,8 +511,13 @@ def create_torch_data_loader(
         num_workers: The number of worker processes to use. If zero, the data loader will
             execute in the main process.
         seed: The seed to use for shuffling the data.
+        split: Which split to use ("train" or "val"). If None, uses full dataset.
+        validation_split: Fraction of episodes to use for validation.
     """
-    dataset = create_torch_dataset(data_config, action_horizon, model_config)
+    dataset = create_torch_dataset(
+        data_config, action_horizon, model_config,
+        split=split, validation_split=validation_split, seed=seed
+    )
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     # Use TorchDataLoader for both frameworks

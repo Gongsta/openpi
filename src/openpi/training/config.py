@@ -415,9 +415,7 @@ class LeRobotKochDataConfig(DataConfigFactory):
         if self.prompt_variations is not None:
             repack_transforms_list.append(_transforms.AugmentPrompt(self.prompt_variations))
 
-        repack_transform = _transforms.Group(
-            inputs=repack_transforms_list
-        )
+        repack_transform = _transforms.Group(inputs=repack_transforms_list)
 
         # The data transforms are applied to the data coming from the dataset *and* during inference.
         # Below, we define the transforms for data going into the model (``inputs``) and the transforms
@@ -625,10 +623,16 @@ class TrainConfig:
 
     # How often (in steps) to log training metrics.
     log_interval: int = 100
+    # How often (in steps) to run evaluation/validation.
+    eval_interval: int = 500
+    # Number of batches to use for evaluation.
+    num_eval_batches: int = 10
+    # Validation split (fraction of episodes to use for validation).
+    validation_split: float = 0.05
     # How often (in steps) to save checkpoints.
     save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
-    keep_period: int | None = 5000
+    keep_period: int | None = 1000
 
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
@@ -919,18 +923,20 @@ _CONFIGS = [
                 "Gongsta/koch-microcontroller-blue-cup",
                 "Gongsta/koch-microcontroller-white-cup",
                 "Gongsta/koch-microcontroller-black-cup",
+                "Gongsta/robustness-koch-microcontroller-blue-cup",
+                "Gongsta/robustness-koch-microcontroller-black-cup",
             ],
             assets=AssetsConfig(asset_id="koch_cup_picking_single"),
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
             # Prompt augmentation: provide variations for each task to improve generalization
             prompt_variations={
-                "Pick up the microcontroller and put it in the left cup": [
-                    "Pick up the microcontroller and put it in the left cup",
-                    "pick up the microcontroller and place it in the left cup",
-                    "grab the microcontroller and put it in the cup on the left",
-                    "move the microcontroller to the left cup",
-                    "put the microcontroller in the left cup",
+                "Pick up the microcontroller and put it in the blue cup": [
+                    "Pick up the microcontroller and put it in the blue cup",
+                    "pick up the microcontroller and place it in the blue cup",
+                    "grab the microcontroller and put it in the blue cup",
+                    "move the microcontroller to the blue cup",
+                    "put the microcontroller in the blue cup",
                 ],
                 "Pick up the microcontroller and put it in the white cup": [
                     "Pick up the microcontroller and put it in the white cup",
@@ -951,9 +957,10 @@ _CONFIGS = [
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
-            peak_lr=2.5e-5,
+            # peak_lr=2.5e-5,
+            peak_lr=1e-4,
             decay_steps=30_000,
-            decay_lr=2.5e-6,
+            decay_lr=1e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         # Freeze all base weights; train only LoRA parameters

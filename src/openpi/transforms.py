@@ -345,11 +345,12 @@ class AugmentPrompt(DataTransformFn):
     variation to help the model generalize to different phrasings.
 
     Example:
-        Base prompt: "Pick up the microcontroller and put it in the left cup"
+        Base prompt: "Pick up the microcontroller and put it in the blue cup"
         Variations: [
-            "pick up the microcontroller and place it in the left cup",
-            "grab the microcontroller and put it in the cup on the left",
-            "move the microcontroller to the left cup"
+            "pick up the microcontroller and place it in the blue cup",
+            "grab the microcontroller and put it in the blue cup",
+            "move the microcontroller to the blue cup"
+            "put the microcontroller in the blue cup",
         ]
     """
 

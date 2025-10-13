@@ -102,6 +102,11 @@ class SGD(OptimizerConfig):
         return optax.sgd(lr, momentum=self.momentum, nesterov=self.nesterov)
 
 
+def create_schedule(lr_schedule: LRScheduleConfig) -> optax.Schedule:
+    """Create a learning rate schedule from a schedule config."""
+    return lr_schedule.create()
+
+
 def create_optimizer(
     optimizer: OptimizerConfig, lr_schedule: LRScheduleConfig, weight_decay_mask: at.PyTree | None = None
 ) -> optax.GradientTransformation:
