@@ -107,13 +107,22 @@ def main(args: Args) -> None:
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
     logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
+    logging.info("Default prompt: %s", args.default_prompt)
 
     server = websocket_policy_server.WebsocketPolicyServer(
         policy=policy,
         host="0.0.0.0",
         port=args.port,
         metadata=policy_metadata,
+        default_prompt=args.default_prompt,
     )
+
+    logging.info("Server endpoints available:")
+    logging.info("  - WebSocket: ws://%s:%s", local_ip, args.port)
+    logging.info("  - Health: http://%s:%s/healthz", local_ip, args.port)
+    logging.info("  - Update prompt: http://%s:%s/update-prompt (POST)", local_ip, args.port)
+    logging.info("  - Current prompt: http://%s:%s/current-prompt (GET)", local_ip, args.port)
+
     server.serve_forever()
 
 

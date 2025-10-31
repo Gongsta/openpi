@@ -887,17 +887,17 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",  # enable LoRA for action expert
         ),
         data=LeRobotKochDataConfig(
-            # repo_id="Gongsta/koch-baby-tshirt-folding",
-            repo_id="Gongsta/koch-tshirt-pickplace-v2",
+            repo_id=["Gongsta/koch-tshirt-folding-v2", "Gongsta/koch-tshirt-folding-v2-more"],
+            # repo_id="Gongsta/koch-tshirt-pickplace-v2",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,  # IMPORTANT: we want to learn policy with delta representation
         ),
         batch_size=64,  # Todo: try 128?
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
-            peak_lr=2.5e-5,
-            decay_steps=30_000,
-            decay_lr=2.5e-6,
+            peak_lr=1e-4,
+            decay_steps=15_000,
+            decay_lr=1e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         # Freeze all base weights; train only LoRA parameters

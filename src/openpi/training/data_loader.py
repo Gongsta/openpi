@@ -264,6 +264,11 @@ def create_torch_dataset(
                 },
                 video_backend=os.environ.get("LEROBOT_VIDEO_BACKEND"),
             )
+
+            # Apply episode-based train/val split if requested
+            if split is not None and validation_split > 0.0:
+                ds = _split_dataset_by_episodes(ds, split, validation_split, seed)
+
             datasets.append(ds)
 
         # Handle task mapping if needed
@@ -322,9 +327,9 @@ def _split_dataset_by_episodes(
     Returns:
         Subset of the dataset containing only the requested split.
     """
-    # Get episode boundaries
-    episode_data_index = dataset.episode_data_index
-    num_episodes = len(episode_data_index["from"])
+    # Get episode boundaries from metadata (HuggingFace Dataset)
+    episodes = dataset.meta.episodes
+    num_episodes = len(episodes)
 
     # Deterministically shuffle episode indices
     rng = np.random.RandomState(seed)
@@ -346,8 +351,9 @@ def _split_dataset_by_episodes(
     frame_indices = []
 
     for episode_idx in sorted(target_episodes):
-        from_idx = episode_data_index["from"][episode_idx].item()
-        to_idx = episode_data_index["to"][episode_idx].item()
+        ep = episodes[episode_idx]
+        from_idx = int(ep["dataset_from_index"])
+        to_idx = int(ep["dataset_to_index"])
         frame_indices.extend(range(from_idx, to_idx))
 
     logging.info(f"Split '{split}' contains {len(frame_indices)} frames from {len(target_episodes)} episodes")
