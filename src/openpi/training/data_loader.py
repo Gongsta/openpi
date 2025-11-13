@@ -684,6 +684,17 @@ class TorchDataLoader:
                     batch = next(data_iter)
                 except StopIteration:
                     break  # We've exhausted the dataset. Create a new iterator and start over.
+                except Exception as e:
+                    # Skip corrupted batches gracefully
+                    import warnings
+
+                    warnings.warn(f"[TorchDataLoader] Skipping corrupted batch due to: {e}")
+                    continue  # move on to next batch
+
+                # Skip None batches (if collate_fn filters bad samples)
+                if batch is None:
+                    continue
+
                 num_items += 1
                 # For JAX, convert to sharded arrays; for PyTorch, return torch tensors
                 if self._sharding is not None:
